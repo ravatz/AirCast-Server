@@ -1,0 +1,28 @@
+build/
+build_*/
+out/
+.vs/
+.vscode/
+CMakeSettings.json
+CMakeUserPresets.json
+vcpkg_installed/
+*.user
+*.sln
+*.vcxproj*
+*.suo
+*.obj
+*.exe
+*.pdb
+*.ilk
+
+# Per-install receiver identity — keeps pk stable across restarts, not
+# something to ship.
+identity.key
+
+# Runtime diagnostics and local ImGui state.
+first_frame.ppm
+imgui.ini
+
+# (FairPlay reply blobs + playfair source are now bundled by default
+#  for an out-of-the-box build experience. See THIRD_PARTY_NOTICES.md
+#  for licensing and Apple-ownership disclaimers.)
