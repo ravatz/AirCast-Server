@@ -42,14 +42,90 @@ std::string narrow(PCWSTR ws) {
     return out;
 }
 
+// -----------------------------------------------------------------------------
+// Dynamic Apple Bonjour (dnssd.dll) definitions
+// -----------------------------------------------------------------------------
+typedef struct _DNSServiceRef_t* DNSServiceRef;
+typedef union _TXTRecordRef_t { char PrivateData[16]; char* ForceNaturalAlignment; } TXTRecordRef;
+typedef uint32_t DNSServiceFlags;
+typedef int32_t  DNSServiceErrorType;
+
+typedef void (__stdcall *DNSServiceRegisterReply)
+    (
+    DNSServiceRef           sdRef,
+    DNSServiceFlags         flags,
+    DNSServiceErrorType     errorCode,
+    const char*             name,
+    const char*             regtype,
+    const char*             domain,
+    void*                   context
+    );
+
+typedef DNSServiceErrorType (__stdcall *DNSServiceRegister_fn)
+    (
+    DNSServiceRef*          sdRef,
+    DNSServiceFlags         flags,
+    uint32_t                interfaceIndex,
+    const char*             name,
+    const char*             regtype,
+    const char*             domain,
+    const char*             host,
+    uint16_t                port,
+    uint16_t                txtLen,
+    const void*             txtRecord,
+    DNSServiceRegisterReply callBack,
+    void*                   context
+    );
+
+typedef void (__stdcall *DNSServiceRefDeallocate_fn)(DNSServiceRef sdRef);
+typedef void (__stdcall *TXTRecordCreate_fn)(TXTRecordRef* txtRecord, uint16_t bufferLen, void* buffer);
+typedef void (__stdcall *TXTRecordDeallocate_fn)(TXTRecordRef* txtRecord);
+typedef DNSServiceErrorType (__stdcall *TXTRecordSetValue_fn)(TXTRecordRef* txtRecord, const char* key, uint8_t valueSize, const void* value);
+typedef uint16_t (__stdcall *TXTRecordGetLength_fn)(const TXTRecordRef* txtRecord);
+typedef const void* (__stdcall *TXTRecordGetBytesPtr_fn)(const TXTRecordRef* txtRecord);
+
+struct BonjourClient {
+    HMODULE module = nullptr;
+    DNSServiceRegister_fn      DNSServiceRegister = nullptr;
+    DNSServiceRefDeallocate_fn DNSServiceRefDeallocate = nullptr;
+    TXTRecordCreate_fn         TXTRecordCreate = nullptr;
+    TXTRecordSetValue_fn       TXTRecordSetValue = nullptr;
+    TXTRecordGetLength_fn      TXTRecordGetLength = nullptr;
+    TXTRecordGetBytesPtr_fn    TXTRecordGetBytesPtr = nullptr;
+    TXTRecordDeallocate_fn     TXTRecordDeallocate = nullptr;
+
+    bool load() {
+        module = LoadLibraryA("dnssd.dll");
+        if (!module) return false;
+
+        DNSServiceRegister = (DNSServiceRegister_fn)GetProcAddress(module, "DNSServiceRegister");
+        DNSServiceRefDeallocate = (DNSServiceRefDeallocate_fn)GetProcAddress(module, "DNSServiceRefDeallocate");
+        TXTRecordCreate = (TXTRecordCreate_fn)GetProcAddress(module, "TXTRecordCreate");
+        TXTRecordSetValue = (TXTRecordSetValue_fn)GetProcAddress(module, "TXTRecordSetValue");
+        TXTRecordGetLength = (TXTRecordGetLength_fn)GetProcAddress(module, "TXTRecordGetLength");
+        TXTRecordGetBytesPtr = (TXTRecordGetBytesPtr_fn)GetProcAddress(module, "TXTRecordGetBytesPtr");
+        TXTRecordDeallocate = (TXTRecordDeallocate_fn)GetProcAddress(module, "TXTRecordDeallocate");
+
+        if (!DNSServiceRegister || !DNSServiceRefDeallocate || !TXTRecordCreate ||
+            !TXTRecordSetValue || !TXTRecordGetLength || !TXTRecordGetBytesPtr || !TXTRecordDeallocate) {
+            FreeLibrary(module);
+            module = nullptr;
+            return false;
+        }
+        return true;
+    }
+
+    ~BonjourClient() {
+        if (module) FreeLibrary(module);
+    }
+};
+
 } // namespace
 
-// One registered service (either _airplay._tcp or _raop._tcp). Owns the
-// backing string storage so the PWSTR pointers inside DNS_SERVICE_INSTANCE
-// stay valid until each asynchronous DNS operation completes.
+// One registered service using Windows DnsServiceRegister
 struct RegisteredService {
-    std::wstring              instance_name;   // "Name._type._tcp.local"
-    std::wstring              host_name;       // "pc.local"
+    std::wstring              instance_name;
+    std::wstring              host_name;
     std::vector<std::wstring> keys;
     std::vector<std::wstring> values;
     std::vector<PWSTR>        key_ptrs;
@@ -73,6 +149,13 @@ struct RegisteredService {
 };
 
 struct MdnsService::Impl {
+    BonjourClient bonjour;
+    bool use_bonjour = false;
+
+    // Handles for Bonjour mode
+    std::vector<DNSServiceRef> bonjour_refs;
+
+    // Handles for native Windows fallback
     std::shared_ptr<RegisteredService> airplay = std::make_shared<RegisteredService>();
     std::shared_ptr<RegisteredService> raop = std::make_shared<RegisteredService>();
     std::shared_ptr<RegisteredService> googlecast = std::make_shared<RegisteredService>();
@@ -80,8 +163,6 @@ struct MdnsService::Impl {
 
     static void WINAPI on_complete(DWORD status, PVOID context,
                                    PDNS_SERVICE_INSTANCE inst) {
-        // The callback retains all request/string storage even if shutdown
-        // times out waiting for the Windows DNS service.
         std::unique_ptr<std::shared_ptr<RegisteredService>> owner(
             static_cast<std::shared_ptr<RegisteredService>*>(context));
         auto service = *owner;
@@ -155,7 +236,130 @@ struct MdnsService::Impl {
         }
     }
 
+    bool register_bonjour_service(const std::string& name, const std::string& regtype, uint16_t port,
+                                  const std::vector<std::pair<std::string, std::string>>& txt_records) {
+        TXTRecordRef txt;
+        bonjour.TXTRecordCreate(&txt, 0, nullptr);
+        for (const auto& kv : txt_records) {
+            bonjour.TXTRecordSetValue(&txt, kv.first.c_str(), static_cast<uint8_t>(kv.second.size()), kv.second.data());
+        }
+
+        DNSServiceRef ref = nullptr;
+        DNSServiceErrorType err = bonjour.DNSServiceRegister(
+            &ref,
+            0,
+            0,
+            name.c_str(),
+            regtype.c_str(),
+            nullptr,
+            nullptr,
+            htons(port),
+            bonjour.TXTRecordGetLength(&txt),
+            bonjour.TXTRecordGetBytesPtr(&txt),
+            nullptr,
+            nullptr
+        );
+        bonjour.TXTRecordDeallocate(&txt);
+
+        if (err == 0 && ref) {
+            bonjour_refs.push_back(ref);
+            LOG_INFO << "Bonjour: registered " << name << " (" << regtype << ") on port " << port;
+            return true;
+        } else {
+            LOG_WARN << "Bonjour: failed to register " << name << " (" << regtype << ") err=" << err;
+            return false;
+        }
+    }
+
     bool start(const ap::airplay::DeviceContext& ctx, uint16_t port) {
+        // Hex-encode Ed25519 public key
+        std::string pk_hex;
+        {
+            static const char* hexd = "0123456789abcdef";
+            pk_hex.reserve(ctx.public_key.size() * 2);
+            for (unsigned char b : ctx.public_key) {
+                pk_hex.push_back(hexd[b >> 4]);
+                pk_hex.push_back(hexd[b & 0x0f]);
+            }
+        }
+
+        std::string hex;
+        for (char c : ctx.deviceid) if (c != ':') hex.push_back(c);
+        std::string raop_name = hex + "@" + ctx.name;
+
+        std::string cast_id;
+        for (char c : ctx.pi) {
+            if (c != '-') cast_id.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+        if (cast_id.size() != 32) {
+            cast_id = "b08f5a79db294384b456a4784d9e6055";
+        }
+
+        // Try Apple Bonjour (dnssd.dll) first for reliable cross-platform mDNS (Android + iOS)
+        if (bonjour.load()) {
+            use_bonjour = true;
+            LOG_INFO << "mDNS: using Apple Bonjour (dnssd.dll) service provider";
+
+            // 1. _airplay._tcp
+            register_bonjour_service(ctx.name, "_airplay._tcp", port, {
+                {"deviceid", ctx.deviceid},
+                {"features", ctx.features},
+                {"flags",    "0x4"},
+                {"model",    ctx.model},
+                {"pi",       ctx.pi},
+                {"pk",       pk_hex},
+                {"pw",       "false"},
+                {"srcvers",  ctx.srcvers},
+                {"vv",       "2"}
+            });
+
+            // 2. _raop._tcp
+            register_bonjour_service(raop_name, "_raop._tcp", port, {
+                {"txtvers", "1"},
+                {"ch",      "2"},
+                {"cn",      "0,1,2,3"},
+                {"da",      "true"},
+                {"et",      "0,3,5"},
+                {"ft",      ctx.features},
+                {"md",      "0,1,2"},
+                {"am",      ctx.model},
+                {"rhd",     "5.6.0.0"},
+                {"pk",      pk_hex},
+                {"pw",      "false"},
+                {"sf",      "0x4"},
+                {"sr",      "44100"},
+                {"ss",      "16"},
+                {"sv",      "false"},
+                {"tp",      "UDP"},
+                {"vn",      "65537"},
+                {"vs",      ctx.srcvers},
+                {"vv",      "2"}
+            });
+
+            // 3. _googlecast._tcp
+            register_bonjour_service(cast_id, "_googlecast._tcp", 8009, {
+                {"id", cast_id},
+                {"ve", "05"},
+                {"md", "Chromecast"},
+                {"ic", "/setup/icon.png"},
+                {"fn", ctx.name},
+                {"ca", "4101"},
+                {"st", "0"},
+                {"nf", "1"}
+            });
+
+            // 4. _display._tcp (Miracast)
+            register_bonjour_service(ctx.name, "_display._tcp", 7236, {
+                {"container-id", "{" + ctx.pi + "}"},
+                {"friendly-name", ctx.name},
+                {"wfd-version", "0100"}
+            });
+
+            return true;
+        }
+
+        // Fallback: Windows DnsServiceRegister
+        LOG_INFO << "mDNS: dnssd.dll not available, falling back to Windows DnsServiceRegister";
         wchar_t host[256];
         DWORD   sz = ARRAYSIZE(host);
         if (!GetComputerNameExW(ComputerNamePhysicalDnsHostname, host, &sz)) {
@@ -163,19 +367,7 @@ struct MdnsService::Impl {
             return false;
         }
         std::wstring local_host = std::wstring(host) + L".local";
-
-        // Hex-encode the Ed25519 public key for the `pk` TXT value (64
-        // chars for 32 bytes). iOS uses it to match the receiver
-        // advertised over mDNS with the one it later pair-verifies.
-        std::wstring pk_hex;
-        {
-            static const wchar_t* hexd = L"0123456789abcdef";
-            pk_hex.reserve(ctx.public_key.size() * 2);
-            for (unsigned char b : ctx.public_key) {
-                pk_hex.push_back(hexd[b >> 4]);
-                pk_hex.push_back(hexd[b & 0x0f]);
-            }
-        }
+        std::wstring pk_hex_w = widen(pk_hex);
 
         // ---- _airplay._tcp --------------------------------------------------
         airplay->host_name     = local_host;
@@ -184,17 +376,12 @@ struct MdnsService::Impl {
                                   L"pi", L"pk", L"pw", L"srcvers", L"vv" };
         airplay->values        = { widen(ctx.deviceid), widen(ctx.features),
                                   L"0x4",             widen(ctx.model),
-                                  widen(ctx.pi),      pk_hex,
+                                  widen(ctx.pi),      pk_hex_w,
                                   L"false",           widen(ctx.srcvers),
                                   L"2" };
         if (!register_service(airplay, port)) return false;
 
         // ---- _raop._tcp -----------------------------------------------------
-        // Instance name: "<12-hex-of-deviceid>@<DeviceName>" (UxPlay convention).
-        std::string hex;
-        for (char c : ctx.deviceid) if (c != ':') hex.push_back(c);
-        std::string raop_name = hex + "@" + ctx.name;
-
         raop->host_name     = local_host;
         raop->instance_name = widen(raop_name) + L"._raop._tcp.local";
         raop->keys          = { L"txtvers", L"ch",  L"cn",  L"da", L"et",
@@ -205,7 +392,7 @@ struct MdnsService::Impl {
                                L"0,1,2,3",          L"true",
                                L"0,3,5",            widen(ctx.features),
                                L"0,1,2",            widen(ctx.model),
-                               L"5.6.0.0",          pk_hex,
+                               L"5.6.0.0",          pk_hex_w,
                                L"false",            L"0x4",
                                L"44100",            L"16",
                                L"false",            L"UDP",
@@ -215,15 +402,7 @@ struct MdnsService::Impl {
             LOG_WARN << "_raop._tcp registration failed; mirroring may still be offered";
         }
 
-        // ---- _googlecast._tcp (ChromeOS & Google Chrome Cast) ----------------
-        std::string cast_id;
-        for (char c : ctx.pi) {
-            if (c != '-') cast_id.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-        }
-        if (cast_id.size() != 32) {
-            cast_id = "b08f5a79db294384b456a4784d9e6055";
-        }
-
+        // ---- _googlecast._tcp -----------------------------------------------
         googlecast->host_name     = local_host;
         googlecast->instance_name = widen(cast_id) + L"._googlecast._tcp.local";
         googlecast->keys          = { L"id", L"ve", L"md", L"ic", L"fn", L"ca", L"st", L"nf" };
@@ -233,7 +412,7 @@ struct MdnsService::Impl {
             LOG_WARN << "_googlecast._tcp registration failed; Chromecast may not be discovered";
         }
 
-        // ---- _display._tcp (Android Miracast / Smart View / Wireless Display) -
+        // ---- _display._tcp (Miracast) ----------------------------------------
         miracast->host_name     = local_host;
         miracast->instance_name = widen(ctx.name) + L"._display._tcp.local";
         miracast->keys          = { L"container-id", L"friendly-name", L"wfd-version" };
@@ -246,6 +425,16 @@ struct MdnsService::Impl {
     }
 
     void stop() {
+        if (use_bonjour) {
+            for (auto ref : bonjour_refs) {
+                if (ref && bonjour.DNSServiceRefDeallocate) {
+                    bonjour.DNSServiceRefDeallocate(ref);
+                }
+            }
+            bonjour_refs.clear();
+            return;
+        }
+
         unregister_service(airplay);
         unregister_service(raop);
         unregister_service(googlecast);
@@ -260,10 +449,6 @@ struct MdnsService::Impl {
 #include <avahi-common/error.h>
 #include <avahi-common/simple-watch.h>
 
-// Dev/hacking aid for running the receiver on Linux. Uses the native
-// avahi-client API + a dedicated poll thread so start() returns
-// immediately. Same _airplay._tcp and _raop._tcp TXT keys as the
-// Windows path, so iOS sees the device identically.
 struct MdnsService::Impl {
     ~Impl() { stop(); }
 
@@ -272,45 +457,39 @@ struct MdnsService::Impl {
     AvahiEntryGroup*      group  = nullptr;
     std::thread           thread;
     std::atomic<bool>     running{false};
-
-    // Captured config for the client-state callback, which runs on the
-    // poll thread and only receives the Impl* via userdata.
     ap::airplay::DeviceContext ctx;
-    uint16_t                   port = 0;
+    uint16_t              port   = 0;
 
-    static AvahiStringList* txt_list(
-        const std::vector<std::pair<const char*, std::string>>& kv) {
+    static AvahiStringList* txt_list(const std::vector<std::pair<const char*, std::string>>& items) {
         AvahiStringList* list = nullptr;
-        for (auto& [k, v] : kv) {
-            list = avahi_string_list_add_pair(list, k, v.c_str());
+        for (const auto& item : items) {
+            std::string entry = std::string(item.first) + "=" + item.second;
+            list = avahi_string_list_add(list, entry.c_str());
         }
         return list;
     }
 
-    static std::string pk_hex(const std::vector<unsigned char>& pk) {
-        static const char* hexd = "0123456789abcdef";
-        std::string out;
-        out.reserve(pk.size() * 2);
-        for (unsigned char b : pk) {
-            out.push_back(hexd[b >> 4]);
-            out.push_back(hexd[b & 0x0f]);
-        }
-        return out;
-    }
-
     bool register_services() {
         if (!client) return false;
-        if (group) avahi_entry_group_reset(group);
-        else       group = avahi_entry_group_new(client, nullptr, nullptr);
         if (!group) {
-            LOG_ERROR << "avahi_entry_group_new failed: "
-                      << avahi_strerror(avahi_client_errno(client));
-            return false;
+            group = avahi_entry_group_new(client, nullptr, nullptr);
+            if (!group) {
+                LOG_ERROR << "avahi_entry_group_new failed: "
+                          << avahi_strerror(avahi_client_errno(client));
+                return false;
+            }
         }
 
-        const std::string pk = pk_hex(ctx.public_key);
+        std::string pk;
+        {
+            static const char* hexd = "0123456789abcdef";
+            pk.reserve(ctx.public_key.size() * 2);
+            for (unsigned char b : ctx.public_key) {
+                pk.push_back(hexd[b >> 4]);
+                pk.push_back(hexd[b & 0x0f]);
+            }
+        }
 
-        // _airplay._tcp — match the Windows TXT set byte-for-byte.
         AvahiStringList* airplay_txt = txt_list({
             {"deviceid", ctx.deviceid},
             {"features", ctx.features},
@@ -334,7 +513,6 @@ struct MdnsService::Impl {
             return false;
         }
 
-        // _raop._tcp instance name: "<12-hex-of-deviceid>@<DeviceName>".
         std::string hex;
         for (char c : ctx.deviceid) if (c != ':') hex.push_back(c);
         const std::string raop_name = hex + "@" + ctx.name;
@@ -436,14 +614,14 @@ struct MdnsService::Impl {
 #endif
 
 MdnsService::MdnsService() : impl_(std::make_unique<Impl>()) {}
-MdnsService::~MdnsService() { stop(); }
+MdnsService::~MdnsService() = default;
 
 bool MdnsService::start(const ap::airplay::DeviceContext& ctx, uint16_t port) {
     return impl_->start(ctx, port);
 }
 
 void MdnsService::stop() {
-    if (impl_) impl_->stop();
+    impl_->stop();
 }
 
 } // namespace ap::mdns
