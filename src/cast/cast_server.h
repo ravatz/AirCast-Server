@@ -27,6 +27,7 @@ public:
 
 private:
     void run(uint16_t port);
+    void handle_client(uint64_t sock);
 
     std::atomic<bool> running_{false};
     std::thread server_thread_;

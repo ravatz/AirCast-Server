@@ -216,11 +216,19 @@ struct MdnsService::Impl {
         }
 
         // ---- _googlecast._tcp (ChromeOS & Google Chrome Cast) ----------------
+        std::string cast_id;
+        for (char c : ctx.pi) {
+            if (c != '-') cast_id.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+        if (cast_id.size() != 32) {
+            cast_id = "b08f5a79db294384b456a4784d9e6055";
+        }
+
         googlecast->host_name     = local_host;
-        googlecast->instance_name = widen(ctx.name) + L"._googlecast._tcp.local";
-        googlecast->keys          = { L"id", L"cd", L"rm", L"ve", L"md", L"ic", L"fn", L"ca", L"st", L"rs" };
-        googlecast->values        = { widen(hex), L"", L"", L"05", L"Chromecast", L"/setup/icon.png",
-                                     widen(ctx.name), L"4101", L"0", L"" };
+        googlecast->instance_name = widen(cast_id) + L"._googlecast._tcp.local";
+        googlecast->keys          = { L"id", L"ve", L"md", L"ic", L"fn", L"ca", L"st", L"nf" };
+        googlecast->values        = { widen(cast_id), L"05", L"Chromecast", L"/setup/icon.png",
+                                     widen(ctx.name), L"4101", L"0", L"1" };
         if (!register_service(googlecast, 8009)) {
             LOG_WARN << "_googlecast._tcp registration failed; Chromecast may not be discovered";
         }
@@ -228,8 +236,8 @@ struct MdnsService::Impl {
         // ---- _display._tcp (Android Miracast / Smart View / Wireless Display) -
         miracast->host_name     = local_host;
         miracast->instance_name = widen(ctx.name) + L"._display._tcp.local";
-        miracast->keys          = { L"container_id", L"friendly-name", L"wfd-version" };
-        miracast->values        = { widen(ctx.pi), widen(ctx.name), L"0100" };
+        miracast->keys          = { L"container-id", L"friendly-name", L"wfd-version" };
+        miracast->values        = { L"{" + widen(ctx.pi) + L"}", widen(ctx.name), L"0100" };
         if (!register_service(miracast, 7236)) {
             LOG_WARN << "_display._tcp registration failed; Android Miracast may not be discovered over Wi-Fi";
         }

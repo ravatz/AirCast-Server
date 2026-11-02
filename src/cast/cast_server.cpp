@@ -172,90 +172,120 @@ void CastServer::run(uint16_t port) {
         socket_t client_sock = accept(impl_->server_sock, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
         if (client_sock == INVALID_SOCK) continue;
 
-        LOG_INFO << "CastServer: accepted client connection";
+        std::thread([this, client_sock]() {
+            handle_client(static_cast<uint64_t>(client_sock));
+        }).detach();
+    }
+}
 
-        SSL* ssl = SSL_new(impl_->ssl_ctx);
-        SSL_set_fd(ssl, static_cast<int>(client_sock));
+static int extract_request_id(const std::string& json) {
+    auto pos = json.find("\"requestId\":");
+    if (pos == std::string::npos) pos = json.find("\"requestId\" :");
+    if (pos != std::string::npos) {
+        const char* p = json.c_str() + pos + 12;
+        while (*p == ' ' || *p == ':') ++p;
+        return std::atoi(p);
+    }
+    return 1;
+}
 
-        if (SSL_accept(ssl) <= 0) {
-            LOG_WARN << "CastServer: SSL_accept failed";
-            SSL_free(ssl);
-            CLOSE_SOCKET(client_sock);
-            continue;
-        }
+void CastServer::handle_client(uint64_t raw_sock) {
+    socket_t client_sock = static_cast<socket_t>(raw_sock);
+    LOG_INFO << "CastServer: accepted client connection";
 
-        // Handle CastV2 messages
-        while (running_.load()) {
-            uint8_t len_buf[4];
-            int r = SSL_read(ssl, len_buf, 4);
-            if (r <= 0) break;
+    SSL* ssl = SSL_new(impl_->ssl_ctx);
+    SSL_set_fd(ssl, static_cast<int>(client_sock));
 
-            uint32_t msg_len = (static_cast<uint32_t>(len_buf[0]) << 24) |
-                               (static_cast<uint32_t>(len_buf[1]) << 16) |
-                               (static_cast<uint32_t>(len_buf[2]) << 8)  |
-                               static_cast<uint32_t>(len_buf[3]);
-
-            if (msg_len > 1024 * 1024) break; // sanity limit 1MB
-
-            std::vector<uint8_t> body(msg_len);
-            size_t read_bytes = 0;
-            while (read_bytes < msg_len) {
-                int n = SSL_read(ssl, body.data() + read_bytes, static_cast<int>(msg_len - read_bytes));
-                if (n <= 0) break;
-                read_bytes += n;
-            }
-            if (read_bytes < msg_len) break;
-
-            CastMessage in_msg;
-            if (!decode_cast_message(body.data(), body.size(), in_msg)) continue;
-
-            // Heartbeat namespace
-            if (in_msg.ns == kHeartbeatNamespace) {
-                if (in_msg.payload_utf8.find("\"PING\"") != std::string::npos) {
-                    CastMessage pong;
-                    pong.source_id      = in_msg.destination_id;
-                    pong.destination_id = in_msg.source_id;
-                    pong.ns             = kHeartbeatNamespace;
-                    pong.payload_utf8   = "{\"type\":\"PONG\"}";
-                    auto framed = encode_framed_message(pong);
-                    SSL_write(ssl, framed.data(), static_cast<int>(framed.size()));
-                }
-            }
-            // Receiver namespace (status & launch)
-            else if (in_msg.ns == kReceiverNamespace) {
-                if (in_msg.payload_utf8.find("\"GET_STATUS\"") != std::string::npos) {
-                    CastMessage status_msg;
-                    status_msg.source_id      = in_msg.destination_id;
-                    status_msg.destination_id = in_msg.source_id;
-                    status_msg.ns             = kReceiverNamespace;
-                    status_msg.payload_utf8   = "{\"type\":\"RECEIVER_STATUS\",\"requestId\":1,"
-                                                "\"status\":{\"volume\":{\"controlType\":\"attenuation\",\"level\":1.0,\"muted\":false,\"stepInterval\":0.05},"
-                                                "\"userEq\":{}}}";
-                    auto framed = encode_framed_message(status_msg);
-                    SSL_write(ssl, framed.data(), static_cast<int>(framed.size()));
-                } else if (in_msg.payload_utf8.find("\"LAUNCH\"") != std::string::npos) {
-                    CastMessage launch_resp;
-                    launch_resp.source_id      = in_msg.destination_id;
-                    launch_resp.destination_id = in_msg.source_id;
-                    launch_resp.ns             = kReceiverNamespace;
-                    launch_resp.payload_utf8   = "{\"type\":\"RECEIVER_STATUS\",\"requestId\":1,"
-                                                 "\"status\":{\"applications\":[{"
-                                                 "\"appId\":\"AirCast\",\"displayName\":\"AirCast Server\","
-                                                 "\"isIdleScreen\":false,\"sessionId\":\"aircast-session\","
-                                                 "\"statusText\":\"Casting\",\"transportId\":\"web-1\","
-                                                 "\"namespaces\":[{\"name\":\"urn:x-cast:com.google.cast.media\"}]"
-                                                 "}],\"volume\":{\"controlType\":\"attenuation\",\"level\":1.0,\"muted\":false,\"stepInterval\":0.05}}}";
-                    auto framed = encode_framed_message(launch_resp);
-                    SSL_write(ssl, framed.data(), static_cast<int>(framed.size()));
-                }
-            }
-        }
-
-        SSL_shutdown(ssl);
+    if (SSL_accept(ssl) <= 0) {
+        LOG_WARN << "CastServer: SSL_accept failed";
         SSL_free(ssl);
         CLOSE_SOCKET(client_sock);
-        LOG_INFO << "CastServer: client connection closed";
+        return;
     }
+
+    // Handle CastV2 messages
+    while (running_.load()) {
+        uint8_t len_buf[4];
+        int r = SSL_read(ssl, len_buf, 4);
+        if (r <= 0) break;
+
+        uint32_t msg_len = (static_cast<uint32_t>(len_buf[0]) << 24) |
+                           (static_cast<uint32_t>(len_buf[1]) << 16) |
+                           (static_cast<uint32_t>(len_buf[2]) << 8)  |
+                           static_cast<uint32_t>(len_buf[3]);
+
+        if (msg_len > 1024 * 1024) break; // sanity limit 1MB
+
+        std::vector<uint8_t> body(msg_len);
+        size_t read_bytes = 0;
+        while (read_bytes < msg_len) {
+            int n = SSL_read(ssl, body.data() + read_bytes, static_cast<int>(msg_len - read_bytes));
+            if (n <= 0) break;
+            read_bytes += n;
+        }
+        if (read_bytes < msg_len) break;
+
+        CastMessage in_msg;
+        if (!decode_cast_message(body.data(), body.size(), in_msg)) continue;
+
+        // Heartbeat namespace
+        if (in_msg.ns == kHeartbeatNamespace) {
+            if (in_msg.payload_utf8.find("\"PING\"") != std::string::npos) {
+                CastMessage pong;
+                pong.source_id      = in_msg.destination_id;
+                pong.destination_id = in_msg.source_id;
+                pong.ns             = kHeartbeatNamespace;
+                pong.payload_utf8   = "{\"type\":\"PONG\"}";
+                auto framed = encode_framed_message(pong);
+                SSL_write(ssl, framed.data(), static_cast<int>(framed.size()));
+            }
+        }
+        // Receiver namespace (status & launch)
+        else if (in_msg.ns == kReceiverNamespace) {
+            int req_id = extract_request_id(in_msg.payload_utf8);
+            if (in_msg.payload_utf8.find("\"GET_STATUS\"") != std::string::npos) {
+                CastMessage status_msg;
+                status_msg.source_id      = in_msg.destination_id;
+                status_msg.destination_id = in_msg.source_id;
+                status_msg.ns             = kReceiverNamespace;
+                status_msg.payload_utf8   = "{\"type\":\"RECEIVER_STATUS\",\"requestId\":" + std::to_string(req_id) + ","
+                                            "\"status\":{\"volume\":{\"controlType\":\"attenuation\",\"level\":1.0,\"muted\":false,\"stepInterval\":0.05},"
+                                            "\"userEq\":{}}}";
+                auto framed = encode_framed_message(status_msg);
+                SSL_write(ssl, framed.data(), static_cast<int>(framed.size()));
+            } else if (in_msg.payload_utf8.find("\"LAUNCH\"") != std::string::npos) {
+                CastMessage launch_resp;
+                launch_resp.source_id      = in_msg.destination_id;
+                launch_resp.destination_id = in_msg.source_id;
+                launch_resp.ns             = kReceiverNamespace;
+                launch_resp.payload_utf8   = "{\"type\":\"RECEIVER_STATUS\",\"requestId\":" + std::to_string(req_id) + ","
+                                             "\"status\":{\"applications\":[{"
+                                             "\"appId\":\"AirCast\",\"displayName\":\"AirCast Server\","
+                                             "\"isIdleScreen\":false,\"sessionId\":\"aircast-session\","
+                                             "\"statusText\":\"Casting\",\"transportId\":\"web-1\","
+                                             "\"namespaces\":[{\"name\":\"urn:x-cast:com.google.cast.media\"}]"
+                                             "}],\"volume\":{\"controlType\":\"attenuation\",\"level\":1.0,\"muted\":false,\"stepInterval\":0.05}}}";
+                auto framed = encode_framed_message(launch_resp);
+                SSL_write(ssl, framed.data(), static_cast<int>(framed.size()));
+            }
+        }
+        // Media namespace
+        else if (in_msg.ns == kMediaNamespace) {
+            int req_id = extract_request_id(in_msg.payload_utf8);
+            CastMessage media_resp;
+            media_resp.source_id      = in_msg.destination_id;
+            media_resp.destination_id = in_msg.source_id;
+            media_resp.ns             = kMediaNamespace;
+            media_resp.payload_utf8   = "{\"type\":\"MEDIA_STATUS\",\"status\":[],\"requestId\":" + std::to_string(req_id) + "}";
+            auto framed = encode_framed_message(media_resp);
+            SSL_write(ssl, framed.data(), static_cast<int>(framed.size()));
+        }
+    }
+
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    CLOSE_SOCKET(client_sock);
+    LOG_INFO << "CastServer: client connection closed";
 }
 
 } // namespace ap::cast
