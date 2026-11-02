@@ -337,6 +337,7 @@ add_executable(airplay-windows
     src/usb/pair_record.cpp
     src/cast/cast_channel.cpp
     src/cast/cast_server.cpp
+    src/cast/dial_server.cpp
     src/miracast/miracast_server.cpp
     src/usb/usb_supervisor.cpp
 )

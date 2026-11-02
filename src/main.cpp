@@ -19,6 +19,7 @@
 #include "platform/single_instance.h"
 #include "platform/firewall.h"
 #include "cast/cast_server.h"
+#include "cast/dial_server.h"
 #include "miracast/miracast_server.h"
 #include "usb/usb_supervisor.h"
 #include "video/video_renderer.h"
@@ -303,6 +304,9 @@ int main(int argc, char** argv) {
     ap::cast::CastServer cast_server;
     cast_server.start(8009, &renderer);
 
+    ap::cast::DialServer dial_server;
+    dial_server.start(ctx.name, ctx.pi, display_ip, 8008);
+
     ap::miracast::MiracastServer miracast_server;
     miracast_server.start(7236, 19000, &renderer);
     std::atomic<bool> disconnect_requested{false};
@@ -402,6 +406,7 @@ int main(int argc, char** argv) {
     hls_player.stop();
     hls_server.stop();
     cast_server.stop();
+    dial_server.stop();
     miracast_server.stop();
     renderer.stop();
     ap::save_settings(ap::snapshot(live_settings));
