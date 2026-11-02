@@ -80,6 +80,7 @@ jobs:
         run: |
           $env:SDL_VIDEODRIVER = "dummy"
           $env:SDL_AUDIODRIVER = "dummy"
+          $proc = Start-Process `
             -FilePath "build\Release\AirCastServer.exe" `
             -ArgumentList "--log" `
             -WindowStyle Hidden `
