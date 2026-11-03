@@ -191,17 +191,30 @@ static int extract_request_id(const std::string& json) {
 
 void CastServer::handle_client(uint64_t raw_sock) {
     socket_t client_sock = static_cast<socket_t>(raw_sock);
-    LOG_INFO << "CastServer: accepted client connection";
+
+    sockaddr_in peer_addr{};
+    socklen_t peer_len = sizeof(peer_addr);
+    char peer_ip[INET_ADDRSTRLEN] = "unknown";
+    int peer_port = 0;
+    if (getpeername(client_sock, reinterpret_cast<sockaddr*>(&peer_addr), &peer_len) == 0) {
+        inet_ntop(AF_INET, &peer_addr.sin_addr, peer_ip, sizeof(peer_ip));
+        peer_port = ntohs(peer_addr.sin_port);
+    }
+    LOG_INFO << "CastServer: accepted client connection from " << peer_ip << ":" << peer_port;
 
     SSL* ssl = SSL_new(impl_->ssl_ctx);
     SSL_set_fd(ssl, static_cast<int>(client_sock));
 
     if (SSL_accept(ssl) <= 0) {
-        LOG_WARN << "CastServer: SSL_accept failed";
+        unsigned long err = ERR_get_error();
+        char err_buf[256];
+        ERR_error_string_n(err, err_buf, sizeof(err_buf));
+        LOG_WARN << "CastServer: SSL_accept failed from " << peer_ip << ": " << err_buf;
         SSL_free(ssl);
         CLOSE_SOCKET(client_sock);
         return;
     }
+    LOG_INFO << "CastServer: TLS handshake succeeded with " << peer_ip;
 
     // Handle CastV2 messages
     while (running_.load()) {
@@ -226,8 +239,13 @@ void CastServer::handle_client(uint64_t raw_sock) {
         if (read_bytes < msg_len) break;
 
         CastMessage in_msg;
-        if (!decode_cast_message(body.data(), body.size(), in_msg)) continue;
+        if (!decode_cast_message(body.data(), body.size(), in_msg)) {
+            LOG_WARN << "CastServer: failed to decode CastMessage from " << peer_ip << " (" << body.size() << " bytes)";
+            continue;
+        }
 
+        LOG_INFO << "CastServer: msg from " << peer_ip << " ns=" << in_msg.ns
+                 << " type=" << in_msg.payload_type << " payload=" << in_msg.payload_utf8;
         // Heartbeat namespace
         if (in_msg.ns == kHeartbeatNamespace) {
             if (in_msg.payload_utf8.find("\"PING\"") != std::string::npos) {
