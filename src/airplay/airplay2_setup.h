@@ -32,6 +32,7 @@ struct StreamRequest {
     int      remote_control_port = 0; // type 96: iOS's own control port
     int      ct               = 0;   // type 96: compression type
     int      spf              = 0;   // type 96: samples per frame
+    int      sample_rate      = 0;   // type 96: `sr` key; 0 = not advertised
     uint64_t audio_format     = 0;
 };
 

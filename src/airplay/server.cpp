@@ -90,6 +90,13 @@ void Server::handle_client(ap::net::ClientSocket client) {
                      << " DACP-ID-present=" << !req.header("dacp-id").empty()
                      << " Active-Remote-present=" << !req.header("active-remote").empty();
         }
+        else {
+            // Everything else (SET_PARAMETER, FLUSH, TEARDOWN, GET /info, …).
+            // Audio-loss investigation needs the full verb sequence: iOS
+            // signals voice/route changes through SET_PARAMETER, not setup.
+            LOG_INFO << "control " << client.peer << ' ' << req.method
+                     << ' ' << req.uri;
+        }
         Response res = dispatch(ctx_, session, req);
         remote->update(req.header("dacp-id"), req.header("active-remote"),
                        session.streams && session.streams->audio_only(),

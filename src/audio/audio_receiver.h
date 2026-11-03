@@ -65,6 +65,7 @@ public:
         std::vector<unsigned char>  aes_iv;                    // 16 B
         int                         ct          = 0;           // compression type
         int                         sample_rate = 44100;
+        int                         spf         = 480;    // samples per frame
         // Non-owning. When set, the receiver acts as a play/pause
         // watchdog: it pushes rate 1 on any RTP packet and rate 0 after
         // ~500 ms of silence. Apple Music and many iOS apps signal

@@ -90,7 +90,7 @@ bool AudioReceiver::start(Config cfg, PauseState state) {
     dc.ct          = cfg_.ct;
     dc.sample_rate = cfg_.sample_rate;
     dc.channels    = 2;
-    dc.spf         = 480;   // observed frame cadence in logs; 512 also seen
+    dc.spf         = cfg_.spf;   // from SETUP; 480 default, 512 also seen
     if (!decoder_->init(dc)) {
         LOG_WARN << "AudioReceiver: AAC decoder init failed — running in "
                     "decrypt-only mode";
@@ -116,7 +116,8 @@ bool AudioReceiver::start(Config cfg, PauseState state) {
     thread_  = std::thread(&AudioReceiver::thread_fn, this);
     LOG_INFO << "AudioReceiver listening (ct=" << cfg_.ct
              << ' ' << ct_name(cfg_.ct)
-             << ", sample_rate=" << cfg_.sample_rate << ')';
+             << ", sample_rate=" << cfg_.sample_rate
+             << ", spf=" << cfg_.spf << ')';
     return true;
 }
 

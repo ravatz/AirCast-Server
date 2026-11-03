@@ -67,6 +67,7 @@ public:
         uint64_t                   stream_connection_id = 0;
         int                        ct          = 0;
         int                        sample_rate = 44100;
+        int                        spf         = 480;
         bool                       mirror_hwaccel = true;
     };
 

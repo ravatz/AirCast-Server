@@ -226,6 +226,11 @@ bool StreamSession::setup_stream(int type,
 
     if (type == 96) {
         // Start the audio receiver on the data socket. It takes ownership.
+        // A second type-96 SETUP while a receiver is live means iOS is
+        // renegotiating the audio stream — codec / sample-rate / frame-cadence
+        // switch, which is what happens when voice processing takes over
+        // (in-game mic, call). The old receiver stops in its destructor.
+        const bool audio_renegotiate = (audio_ != nullptr);
         audio_ = std::make_unique<ap::audio::AudioReceiver>();
         ap::audio::AudioReceiver::Config ac;
         ac.data_sock   = d_sock;
@@ -236,6 +241,7 @@ bool StreamSession::setup_stream(int type,
         ac.aes_iv      = opts.aes_iv;
         ac.ct          = opts.ct;
         ac.sample_rate = opts.sample_rate;
+        ac.spf         = opts.spf;
         ac.renderer    = renderer_;
         if (!audio_->start(std::move(ac), std::move(paused_audio_))) {
             LOG_WARN << "SETUP stream 96: AudioReceiver failed to start "
@@ -243,6 +249,11 @@ bool StreamSession::setup_stream(int type,
             // If start() failed before taking ownership, we close the sock here.
             ap::net::close_socket(d_sock);
             audio_.reset();
+        }
+        else if (audio_renegotiate) {
+            LOG_WARN << "SETUP stream 96: audio stream renegotiated mid-session"
+                     << " — ct=" << opts.ct << " sr=" << opts.sample_rate
+                     << " spf=" << opts.spf;
         }
 
         // AudioReceiver borrows the control socket to read RTP/NTP anchors.

@@ -117,11 +117,16 @@ bool parse_airplay2_setup(const unsigned char* body, std::size_t len,
             sr.remote_control_port = static_cast<int>(get_uint(s, "controlPort"));
             sr.ct                = static_cast<int>(get_uint(s, "ct"));
             sr.spf               = static_cast<int>(get_uint(s, "spf"));
+            sr.sample_rate       = static_cast<int>(get_uint(s, "sr"));
             sr.audio_format      = get_uint(s, "audioFormat");
             out.streams.push_back(sr);
             LOG_INFO << "  stream[" << i << "] type=" << sr.type
                      << " streamConnectionID=" << sr.stream_conn_id
-                     << " remoteControlPort=" << sr.remote_control_port;
+                     << " remoteControlPort=" << sr.remote_control_port
+                     << " ct=" << sr.ct
+                     << " spf=" << sr.spf
+                     << " sr=" << sr.sample_rate
+                     << " audioFormat=" << sr.audio_format;
         }
     }
 

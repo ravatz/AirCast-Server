@@ -425,7 +425,16 @@ Response setup_airplay2_path(ClientSession& session, const Request& req) {
             opts.aes_iv               = session.aes_iv;
             opts.stream_connection_id = parsed.streams[i].stream_conn_id;
             opts.ct                   = parsed.streams[i].ct;
-            opts.sample_rate          = 44100;  // TODO: parse from SETUP when != 44.1k
+            // iOS advertises the real audio rate in the SETUP `sr` key. When
+            // voice processing is active it re-SETUPs the audio stream at a
+            // different rate / frame cadence; hardcoding 44100 there makes the
+            // AudioSpecificConfig wrong and the decoder returns silence.
+            opts.sample_rate          = parsed.streams[i].sample_rate > 0
+                                      ? parsed.streams[i].sample_rate
+                                      : 44100;
+            opts.spf                  = parsed.streams[i].spf > 0
+                                      ? parsed.streams[i].spf
+                                      : 480;
             // Prefer the live UI toggle when available; the static
             // session.mirror_hwaccel (seeded from the CLI flag) is
             // the headless fallback.

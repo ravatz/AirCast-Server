@@ -50,6 +50,19 @@ struct BitWriter {
     }
 };
 
+// Minimal ASC for a plain GA object type (AAC-MAIN = 1, AAC-LC = 2):
+//   audioObjectType(5) + samplingFrequencyIndex(4) + channelConfiguration(4)
+// ELD (39) uses the 5-bit escape form plus an ELDSpecificConfig, so it cannot
+// share this builder. Handing ELD extradata to an AAC-LC stream decodes to
+// silence, which is why ct has to select the shape rather than defaulting.
+std::vector<uint8_t> build_asc_aac(int aot, int sample_rate, int channels) {
+    BitWriter bw;
+    bw.put(aot,                      5);
+    bw.put(freq_index(sample_rate),  4);
+    bw.put(channels,                 4);
+    return std::move(bw.buf);
+}
+
 } // namespace
 
 std::vector<uint8_t> build_asc_aac_eld(int sample_rate, int channels, int spf) {
@@ -106,6 +119,7 @@ bool AacDecoder::init(const Config& cfg) {
     //   3       = AAC-LC
     //   4 / 8   = AAC-ELD (8 is "AAC-ELD 44.1k" per observed streams)
     const bool is_alac = (cfg.ct == 2);
+    const bool is_lc   = (cfg.ct == 3);   // AAC-LC: plain GA ASC, not ELD
 
     const AVCodecID codec_id = is_alac ? AV_CODEC_ID_ALAC : AV_CODEC_ID_AAC;
     impl_->codec = avcodec_find_decoder(codec_id);
@@ -152,6 +166,8 @@ bool AacDecoder::init(const Config& cfg) {
             0x00, 0x00, static_cast<uint8_t>((cfg.sample_rate >> 8) & 0xff),
                        static_cast<uint8_t>(cfg.sample_rate & 0xff),
         };
+    } else if (is_lc) {
+        extradata = build_asc_aac(2, cfg.sample_rate, cfg.channels);
     } else {
         extradata = build_asc_aac_eld(cfg.sample_rate, cfg.channels, cfg.spf);
     }
@@ -176,7 +192,7 @@ bool AacDecoder::init(const Config& cfg) {
         extra_hex += tmp;
     }
     LOG_INFO << "AacDecoder ready: "
-             << (is_alac ? "ALAC" : "AAC-ELD") << " " << cfg.channels
+             << (is_alac ? "ALAC" : (is_lc ? "AAC-LC" : "AAC-ELD")) << " " << cfg.channels
              << "ch @" << cfg.sample_rate << "Hz"
              << (is_alac ? "" : " spf=") << (is_alac ? "" : std::to_string(cfg.spf))
              << " extradata=" << extra_hex;
